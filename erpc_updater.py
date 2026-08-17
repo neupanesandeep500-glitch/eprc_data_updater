@@ -2,6 +2,8 @@ import os
 import re
 import io
 import json
+import sys
+import time
 from datetime import datetime
 from urllib.parse import urljoin
 
@@ -27,8 +29,9 @@ session.headers.update({
         "Chrome/151.0 Safari/537.36"
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
-              "image/avif,image/webp,*/*;q=0.8",
+    "image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.erpc.gov.in/",
 })
 
 
@@ -58,15 +61,15 @@ def prepare_control_sheet(spreadsheet):
     ]
     values = sheet.get_all_values()
     if not values:
-        sheet.update("A1:J1", [headers])
+        sheet.update("A1", [headers])
     elif values[0] != headers:
-        sheet.update("A1:J1", [headers])
+        sheet.update("A1", [headers])
     return sheet
 
 
 DATE_PATTERN = re.compile(
     r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})"
-    r"\s*(?:to|-|–|—)\s*"
+    r"\s*(?:to|\-|\–|\—)\s*"
     r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})",
     re.I,
 )
@@ -92,18 +95,32 @@ def is_relevant_account(text):
     return True
 
 
+def fetch_with_retry(url, max_retries=3, **kwargs):
+    """Fetch URL with exponential backoff retry."""
+    for attempt in range(max_retries):
+        try:
+            response = session.get(url, timeout=60, **kwargs)
+            response.raise_for_status()
+            return response
+        except Exception as e:
+            print(f"Attempt {attempt + 1}/{max_retries} failed: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+            else:
+                raise
+
+
 def find_latest_account():
     print("Opening ERPC page:", ERPC_URL)
-    response = session.get(ERPC_URL, timeout=60)
+    response = fetch_with_retry(ERPC_URL)
     print("ERPC HTTP status:", response.status_code)
-    response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "html.parser")
     candidates = []
 
     for link in soup.find_all("a", href=True):
         link_text = " ".join(link.get_text(" ", strip=True).split())
-        if not re.search(r"data\s*files\s*1", link_text, re.I):
+        if not re.search(r"data\s*files?\s*1", link_text, re.I):
             continue
 
         href = urljoin(ERPC_URL, link["href"])
@@ -130,11 +147,12 @@ def find_latest_account():
                 node = node.find_previous()
                 if not node:
                     break
-                txt = " ".join(node.get_text(" ", strip=True).split())
-                if txt and len(txt) < 1200:
-                    if is_relevant_account(txt) and extract_date_range(txt):
-                        account_text = txt
-                        break
+                if hasattr(node, 'get_text'):
+                    txt = " ".join(node.get_text(" ", strip=True).split())
+                    if txt and len(txt) < 1200:
+                        if is_relevant_account(txt) and extract_date_range(txt):
+                            account_text = txt
+                            break
 
         if not account_text:
             continue
@@ -149,6 +167,12 @@ def find_latest_account():
             })
 
     if not candidates:
+        # Debug: print all links found to help diagnose page structure changes
+        print("DEBUG: All links on page:")
+        for link in soup.find_all("a", href=True):
+            txt = " ".join(link.get_text(" ", strip=True).split())
+            if txt:
+                print(f"  - {txt[:100]} -> {link['href'][:100]}")
         raise RuntimeError(
             "No normal DSM settlement account with 'Data Files 1' "
             "was found on the ERPC page."
@@ -177,18 +201,23 @@ def find_latest_account():
 
 def download_excel(url):
     print("Downloading:", url)
-    response = session.get(url, timeout=120)
+    response = fetch_with_retry(url, timeout=120)
     print("Excel HTTP status:", response.status_code)
-    response.raise_for_status()
     if len(response.content) < 100:
         raise RuntimeError("Downloaded file is unexpectedly small.")
     return response.content
 
 
 def read_excel_sheet(excel_bytes, target_name):
-    wb = load_workbook(
-        io.BytesIO(excel_bytes), data_only=True, read_only=True
-    )
+    # FIX 1: Removed read_only=True because data_only=True has NO EFFECT
+    # in read-only mode. All formula cells would return None, breaking
+    # header detection and data extraction.
+    try:
+        wb = load_workbook(io.BytesIO(excel_bytes), data_only=True)
+    except Exception as e:
+        print(f"Warning: Failed to load with data_only=True: {e}")
+        wb = load_workbook(io.BytesIO(excel_bytes))
+
     target = None
     normalized_target = re.sub(r"[\s_\-]", "", target_name.lower())
 
@@ -285,15 +314,22 @@ def insert_new_rows(sheet, headers, rows):
         return 0
 
     ensure_header(sheet, headers)
-    sheet.insert_rows([[] for _ in rows], row=2)
 
-    end_row = 1 + len(rows)
+    # FIX 2: Replaced empty-row insertion + update with direct padded-row insertion.
+    # The old code: sheet.insert_rows([[] for _ in rows], row=2) often fails
+    # because Google Sheets API rejects rows with zero columns.
     end_col = max(len(headers), max(len(r) for r in rows))
-
     padded_rows = [r + [""] * (end_col - len(r)) for r in rows]
-    cell_range = f"A2:{gspread.utils.rowcol_to_a1(end_row, end_col)}"
-    sheet.update(cell_range, padded_rows)
-    return len(rows)
+
+    # Batch insert to stay within Google API limits
+    BATCH_SIZE = 500
+    total_inserted = 0
+    for i in range(0, len(padded_rows), BATCH_SIZE):
+        batch = padded_rows[i:i + BATCH_SIZE]
+        sheet.insert_rows(batch, row=2)
+        total_inserted += len(batch)
+
+    return total_inserted
 
 
 def add_control_record(control, account, nea_count, nvvn_count, status):
@@ -320,49 +356,56 @@ def main():
     print("ERPC LATEST DSM UPDATE")
     print("=" * 60)
 
-    spreadsheet = connect_google_sheet()
-    nea_sheet = get_or_create_sheet(spreadsheet, NEA_SHEET)
-    nvvn_sheet = get_or_create_sheet(spreadsheet, NVVN_SHEET)
-    control = prepare_control_sheet(spreadsheet)
+    try:
+        spreadsheet = connect_google_sheet()
+        nea_sheet = get_or_create_sheet(spreadsheet, NEA_SHEET)
+        nvvn_sheet = get_or_create_sheet(spreadsheet, NVVN_SHEET)
+        control = prepare_control_sheet(spreadsheet)
 
-    account = find_latest_account()
-    period = (
-        account["start"].strftime("%d.%m.%Y")
-        + " to " + account["end"].strftime("%d.%m.%Y")
-    )
+        account = find_latest_account()
+        period = (
+            account["start"].strftime("%d.%m.%Y")
+            + " to " + account["end"].strftime("%d.%m.%Y")
+        )
 
-    print("Settlement period:", period)
+        print("Settlement period:", period)
 
-    if period in set(control.col_values(1)):
-        print("Already imported. No action required.")
-        return
+        if period in set(control.col_values(1)):
+            print("Already imported. No action required.")
+            return
 
-    excel = download_excel(account["data_url"])
+        excel = download_excel(account["data_url"])
 
-    nea_raw = read_excel_sheet(excel, "NEA-Bihar")
-    nvvn_raw = read_excel_sheet(excel, "NVVN-Nepal")
+        nea_raw = read_excel_sheet(excel, "NEA-Bihar")
+        nvvn_raw = read_excel_sheet(excel, "NVVN-Nepal")
 
-    nea_headers, nea_rows = prepare_data(nea_raw, account)
-    nvvn_headers, nvvn_rows = prepare_data(nvvn_raw, account)
+        nea_headers, nea_rows = prepare_data(nea_raw, account)
+        nvvn_headers, nvvn_rows = prepare_data(nvvn_raw, account)
 
-    nea_count = 0
-    if period not in existing_periods(nea_sheet):
-        nea_count = insert_new_rows(nea_sheet, nea_headers, nea_rows)
+        nea_count = 0
+        if period not in existing_periods(nea_sheet):
+            nea_count = insert_new_rows(nea_sheet, nea_headers, nea_rows)
 
-    nvvn_count = 0
-    if period not in existing_periods(nvvn_sheet):
-        nvvn_count = insert_new_rows(nvvn_sheet, nvvn_headers, nvvn_rows)
+        nvvn_count = 0
+        if period not in existing_periods(nvvn_sheet):
+            nvvn_count = insert_new_rows(nvvn_sheet, nvvn_headers, nvvn_rows)
 
-    add_control_record(
-        control, account, nea_count, nvvn_count, "SUCCESS"
-    )
+        add_control_record(
+            control, account, nea_count, nvvn_count, "SUCCESS"
+        )
 
-    print("=" * 60)
-    print("UPDATE SUCCESSFUL")
-    print("Period:", period)
-    print("NEA rows:", nea_count)
-    print("NVVN rows:", nvvn_count)
-    print("=" * 60)
+        print("=" * 60)
+        print("UPDATE SUCCESSFUL")
+        print("Period:", period)
+        print("NEA rows:", nea_count)
+        print("NVVN rows:", nvvn_count)
+        print("=" * 60)
+
+    except Exception as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
