@@ -69,7 +69,7 @@ def prepare_control_sheet(spreadsheet):
 
 DATE_PATTERN = re.compile(
     r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})"
-    r"\s*(?:to|\-|\–|\—)\s*"
+    r"\s*(?:to|\-|\u2013|\u2014)\s*"
     r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})",
     re.I,
 )
@@ -96,7 +96,6 @@ def is_relevant_account(text):
 
 
 def fetch_with_retry(url, max_retries=3, **kwargs):
-    """Fetch URL with exponential backoff retry."""
     for attempt in range(max_retries):
         try:
             response = session.get(url, timeout=60, **kwargs)
@@ -167,7 +166,6 @@ def find_latest_account():
             })
 
     if not candidates:
-        # Debug: print all links found to help diagnose page structure changes
         print("DEBUG: All links on page:")
         for link in soup.find_all("a", href=True):
             txt = " ".join(link.get_text(" ", strip=True).split())
@@ -209,9 +207,6 @@ def download_excel(url):
 
 
 def read_excel_sheet(excel_bytes, target_name):
-    # FIX 1: Removed read_only=True because data_only=True has NO EFFECT
-    # in read-only mode. All formula cells would return None, breaking
-    # header detection and data extraction.
     try:
         wb = load_workbook(io.BytesIO(excel_bytes), data_only=True)
     except Exception as e:
@@ -315,13 +310,9 @@ def insert_new_rows(sheet, headers, rows):
 
     ensure_header(sheet, headers)
 
-    # FIX 2: Replaced empty-row insertion + update with direct padded-row insertion.
-    # The old code: sheet.insert_rows([[] for _ in rows], row=2) often fails
-    # because Google Sheets API rejects rows with zero columns.
     end_col = max(len(headers), max(len(r) for r in rows))
     padded_rows = [r + [""] * (end_col - len(r)) for r in rows]
 
-    # Batch insert to stay within Google API limits
     BATCH_SIZE = 500
     total_inserted = 0
     for i in range(0, len(padded_rows), BATCH_SIZE):
