@@ -68,9 +68,9 @@ def prepare_control_sheet(spreadsheet):
 
 
 DATE_PATTERN = re.compile(
-    r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})"
-    r"\s*(?:to|\-|\u2013|\u2014)\s*"
-    r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})",
+    "(\\d{1,2})[.\\-/](\\d{1,2})[.\\-/](\\d{4})"
+    "\\s*(?:to|\\-|\\u2013|\\u2014)\\s*"
+    "(\\d{1,2})[.\\-/](\\d{1,2})[.\\-/](\\d{4})",
     re.I,
 )
 
@@ -90,7 +90,7 @@ def is_relevant_account(text):
         return False
     if "revised" in t:
         return False
-    if re.search(r"\bsced\s+account\b", t):
+    if re.search("\\bsced\\s+account\\b", t):
         return False
     return True
 
@@ -119,7 +119,7 @@ def find_latest_account():
 
     for link in soup.find_all("a", href=True):
         link_text = " ".join(link.get_text(" ", strip=True).split())
-        if not re.search(r"data\s*files?\s*1", link_text, re.I):
+        if not re.search("data\\s*files?\\s*1", link_text, re.I):
             continue
 
         href = urljoin(ERPC_URL, link["href"])
@@ -214,7 +214,7 @@ def read_excel_sheet(excel_bytes, target_name):
         wb = load_workbook(io.BytesIO(excel_bytes))
 
     target = None
-    normalized_target = re.sub(r"[\s_\-]", "", target_name.lower())
+    normalized_target = re.sub("[\\s_\\-]", "", target_name.lower())
 
     for name in wb.sheetnames:
         normalized = re.sub(r"[\s_\-]", "", name.lower())
