@@ -383,8 +383,13 @@ def main():
     parser.add_argument("--max-pages", type=int, default=200)
     parser.add_argument("--stop-after-empty", type=int, default=6)
     parser.add_argument("--google-sheets", action="store_true",
-                         help="Also push to Google Sheets using GOOGLE_SHEET_ID / "
-                              "GOOGLE_SERVICE_ACCOUNT_JSON env vars.")
+                         help="Also push to Google Sheets.")
+    parser.add_argument("--sheet-id", default=None,
+                         help="Google Sheet ID. Falls back to GOOGLE_SHEET_ID env var.")
+    parser.add_argument("--service-account-file", default=None,
+                         help="Path to a service-account JSON key file. Easier on "
+                              "Windows than pasting multi-line JSON into an env var. "
+                              "Falls back to GOOGLE_SERVICE_ACCOUNT_JSON env var if not given.")
     args = parser.parse_args()
 
     if not HAVE_PANDAS:
@@ -458,11 +463,18 @@ def main():
         print("\n" + "=" * 60)
         print("STEP 4: Pushing to Google Sheets")
         print("=" * 60)
-        sheet_id = os.environ.get("GOOGLE_SHEET_ID")
-        service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+        sheet_id = args.sheet_id or os.environ.get("GOOGLE_SHEET_ID")
+
+        service_account_json = None
+        if args.service_account_file:
+            with open(args.service_account_file, "r", encoding="utf-8") as f:
+                service_account_json = f.read()
+        else:
+            service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+
         if not sheet_id or not service_account_json:
-            print("Skipping - set GOOGLE_SHEET_ID and GOOGLE_SERVICE_ACCOUNT_JSON "
-                  "env vars to enable this.")
+            print("Skipping - provide --sheet-id (or GOOGLE_SHEET_ID env var) and "
+                  "--service-account-file (or GOOGLE_SERVICE_ACCOUNT_JSON env var).")
         else:
             push_to_google_sheets(sheet_id, service_account_json, frames)
 
