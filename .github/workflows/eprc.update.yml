@@ -4,18 +4,17 @@ on:
   workflow_dispatch:
 
   schedule:
-    # 04:15 UTC = 10:00 AM Nepal Time
-    - cron: "15 4 * * *"
+    - cron: "0 */6 * * *"
 
 jobs:
-  update-erpc:
+  update-erpc-data:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -31,4 +30,3 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
         run: |
           python erpc_updater.py
-
